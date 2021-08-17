@@ -5,7 +5,7 @@
 // @supportURL   https://github.com/Xmader/musescore-downloader/issues
 // @updateURL    https://msdl.librescore.org/install.user.js
 // @downloadURL  https://msdl.librescore.org/install.user.js
-// @version      0.24.3
+// @version      0.26.0
 // @description  download sheet music from musescore.com for free, no login or Musescore Pro required | 免登录、免 Musescore Pro，免费下载 musescore.com 上的曲谱
 // @author       Xmader
 // @icon         https://librescore.org/img/icons/logo.svg
@@ -348,6 +348,9 @@
             // eslint-disable-next-line @typescript-eslint/no-var-requires
             const nodeFetch = require('node-fetch');
             return (input, init) => {
+                if (typeof input === 'string' && !input.startsWith('http')) { // fix: Only absolute URLs are supported
+                    input = 'https://musescore.com' + input;
+                }
                 init = Object.assign({ headers: NODE_FETCH_HEADERS }, init);
                 // eslint-disable-next-line @typescript-eslint/no-unsafe-return
                 return nodeFetch(input, init);
@@ -355,9 +358,14 @@
         }
     };
     const fetchData = (url, init) => __awaiter(void 0, void 0, void 0, function* () {
-        const r = yield fetch(url, init);
+        const _fetch = getFetch();
+        const r = yield _fetch(url, init);
         const data = yield r.arrayBuffer();
         return new Uint8Array(data);
+    });
+    const fetchBuffer = (url, init) => __awaiter(void 0, void 0, void 0, function* () {
+        const d = yield fetchData(url, init);
+        return Buffer.from(d.buffer);
     });
     const assertRes = (r) => {
         if (!r.ok)
@@ -417,7 +425,7 @@
             targetEl.setAttribute(eventName, `this['${id}'](document.createElement('iframe'))`);
         });
     });
-    const console$1 = (window || global).console; // Object.is(window.console, unsafeWindow.console) == false
+    const console$1 = (typeof window !== 'undefined' ? window : global).console; // Object.is(window.console, unsafeWindow.console) == false
     const windowOpenAsync = (targetEl, ...args) => {
         return getSandboxWindowAsync(targetEl).then(w => w.open(...args));
     };
@@ -446,7 +454,7 @@
     };
 
     const PDFWorker = function () { 
-    (function () {
+    var worker = (function (exports) {
 
         function __awaiter(thisArg, _arguments, P, generator) {
             function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
@@ -26441,28 +26449,47 @@ Please pipe the document into a Node stream.\
         });
 
         /// <reference lib="webworker" />
-        const readData = (blob, type) => {
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => {
-                    const result = reader.result;
-                    resolve(result);
-                };
-                reader.onerror = reject;
+        const readData = (data, type) => {
+            if (!(data instanceof Uint8Array)) { // blob
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                        const result = reader.result;
+                        resolve(result);
+                    };
+                    reader.onerror = reject;
+                    if (type === 'dataUrl') {
+                        reader.readAsDataURL(data);
+                    }
+                    else {
+                        reader.readAsText(data);
+                    }
+                });
+            }
+            else { // buffer
                 if (type === 'dataUrl') {
-                    reader.readAsDataURL(blob);
+                    return 'data:image/png;base64,' + data.toString('base64');
                 }
                 else {
-                    reader.readAsText(blob);
+                    return data.toString('utf-8');
                 }
-            });
+            }
         };
+        /**
+         * @platform browser
+         */
         const fetchBlob = (imgUrl) => __awaiter(void 0, void 0, void 0, function* () {
             const r = yield fetch(imgUrl, {
                 cache: 'no-cache',
             });
             return r.blob();
         });
+        /**
+         * @example
+         * import { PDFWorker } from '../dist/cache/worker'
+         * const { generatePDF } = PDFWorker()
+         * const pdfData = await generatePDF(...)
+         */
         const generatePDF = (imgBlobs, imgType, width, height) => __awaiter(void 0, void 0, void 0, function* () {
             // @ts-ignore
             const pdf = new PDFDocument({
@@ -26495,20 +26522,35 @@ Please pipe the document into a Node stream.\
             const buf = yield pdf.getBuffer();
             return buf.buffer;
         });
-        onmessage = (e) => __awaiter(void 0, void 0, void 0, function* () {
-            const [imgUrls, imgType, width, height,] = e.data;
-            const imgBlobs = yield Promise.all(imgUrls.map(url => fetchBlob(url)));
-            const pdfBuf = yield generatePDF(imgBlobs, imgType, width, height);
-            postMessage(pdfBuf, [pdfBuf]);
-        });
+        /**
+         * @platform browser (web worker)
+         */
+        if (typeof onmessage !== 'undefined') {
+            onmessage = (e) => __awaiter(void 0, void 0, void 0, function* () {
+                const [imgUrls, imgType, width, height,] = e.data;
+                const imgBlobs = yield Promise.all(imgUrls.map(url => fetchBlob(url)));
+                const pdfBuf = yield generatePDF(imgBlobs, imgType, width, height);
+                postMessage(pdfBuf, [pdfBuf]);
+            });
+        }
 
-    }());
+        exports.generatePDF = generatePDF;
+
+        return exports;
+
+    }({}));
+    return worker
     };
 
     const scriptUrlFromFunction = (fn) => {
         const blob = new Blob(['(' + fn.toString() + ')()'], { type: 'application/javascript' });
         return window.URL.createObjectURL(blob);
     };
+    // Node.js fix
+    if (typeof Worker === 'undefined') {
+        globalThis.Worker = class {
+        }; // noop shim
+    }
     class PDFWorkerHelper extends Worker {
         constructor() {
             const url = scriptUrlFromFunction(PDFWorker);
@@ -26575,13 +26617,15 @@ Please pipe the document into a Node stream.\
         }
     }
 
-    /* eslint-disable no-extend-native */
     const TYPE_REG = /type=(img|mp3|midi)/;
     /**
      * I know this is super hacky.
      */
     const magicHookConstr = (() => {
         const l = {};
+        if (detectNode) { // noop in CLI
+            return () => Promise.resolve('');
+        }
         try {
             const p = Object.getPrototypeOf(document.body);
             Object.setPrototypeOf(document.body, null);
@@ -26597,7 +26641,7 @@ Please pipe the document into a Node stream.\
                                 const token = (_a = init === null || init === void 0 ? void 0 : init.headers) === null || _a === void 0 ? void 0 : _a.Authorization;
                                 if (typeof url === 'string' && token) {
                                     const m = url.match(TYPE_REG);
-                                    console$1.debug(url, token, m);
+                                    console.debug(url, token, m);
                                     if (m) {
                                         const type = m[1];
                                         // eslint-disable-next-line no-unused-expressions
@@ -26613,7 +26657,7 @@ Please pipe the document into a Node stream.\
             Object.setPrototypeOf(document.body, p);
         }
         catch (err) {
-            console$1.error(err);
+            console.error(err);
         }
         return (type) => __awaiter(void 0, void 0, void 0, function* () {
             return new Promise((resolve) => {
@@ -26629,51 +26673,70 @@ Please pipe the document into a Node stream.\
         midi: magicHookConstr('midi'),
         mp3: magicHookConstr('mp3'),
     };
+
+    /* eslint-disable no-extend-native */
     const getApiUrl = (id, type, index) => {
         return `/api/jmuse?id=${id}&type=${type}&index=${index}&v2=1`;
     };
+    /**
+     * hard-coded auth tokens
+     */
+    const useBuiltinAuth = (type) => {
+        switch (type) {
+            case 'img': return '8c022bdef45341074ce876ae57a48f64b86cdcf5';
+            case 'midi': return '38fb9efaae51b0c83b5bb5791a698b48292129e7';
+            case 'mp3': return '63794e5461e4cfa046edfbdddfccc1ac16daffd2';
+        }
+    };
     const getApiAuth = (type, index) => __awaiter(void 0, void 0, void 0, function* () {
-        var _a;
+        var _a, _b, _c;
+        if (detectNode) {
+            // we cannot intercept API requests in Node.js (as no requests are sent), so go straightforward to the hard-coded tokens
+            return useBuiltinAuth(type);
+        }
         const magic = magics[type];
         if (magic instanceof Promise) {
             // force to retrieve the MAGIC
-            switch (type) {
-                case 'midi': {
-                    const el = document.querySelector('button[hasaccess]');
-                    el.click();
-                    break;
+            try {
+                switch (type) {
+                    case 'midi': {
+                        const fsBtn = document.querySelector('button[title="Toggle Fullscreen"]');
+                        const el = (_b = (_a = fsBtn.parentElement) === null || _a === void 0 ? void 0 : _a.parentElement) === null || _b === void 0 ? void 0 : _b.querySelector('button');
+                        el.click();
+                        break;
+                    }
+                    case 'mp3': {
+                        const el = document.querySelector('button[title="Toggle Play"]');
+                        el.click();
+                        break;
+                    }
+                    case 'img': {
+                        const imgE = document.querySelector('img[src*=score_]');
+                        const nextE = (_c = imgE === null || imgE === void 0 ? void 0 : imgE.parentElement) === null || _c === void 0 ? void 0 : _c.nextElementSibling;
+                        if (nextE)
+                            nextE.scrollIntoView();
+                        break;
+                    }
                 }
-                case 'mp3': {
-                    const el = document.querySelector('button[title="Toggle Play"]');
-                    el.click();
-                    break;
-                }
-                case 'img': {
-                    const imgE = document.querySelector('img[src*=score_]');
-                    const nextE = (_a = imgE === null || imgE === void 0 ? void 0 : imgE.parentElement) === null || _a === void 0 ? void 0 : _a.nextElementSibling;
-                    if (nextE)
-                        nextE.scrollIntoView();
-                    break;
-                }
+            }
+            catch (err) {
+                console.error(err);
+                return useBuiltinAuth(type);
             }
         }
         try {
             return yield useTimeout(magic, 5 * 1000 /* 5s */);
         }
-        catch (_b) {
-            console$1.error(type, 'token timeout');
-            switch (type) {
-                // try hard-coded tokens
-                case 'img': return '8c022bdef45341074ce876ae57a48f64b86cdcf5';
-                case 'midi': return '38fb9efaae51b0c83b5bb5791a698b48292129e7';
-                case 'mp3': return '63794e5461e4cfa046edfbdddfccc1ac16daffd2';
-            }
+        catch (_d) {
+            console.error(type, 'token timeout');
+            // try hard-coded tokens
+            return useBuiltinAuth(type);
         }
     });
-    const getFileUrl = (id, type, index = 0) => __awaiter(void 0, void 0, void 0, function* () {
+    const getFileUrl = (id, type, index = 0, _fetch = getFetch()) => __awaiter(void 0, void 0, void 0, function* () {
         const url = getApiUrl(id, type, index);
         const auth = yield getApiAuth(type);
-        const r = yield fetch(url, {
+        const r = yield _fetch(url, {
             headers: {
                 Authorization: auth,
             },
@@ -26682,20 +26745,19 @@ Please pipe the document into a Node stream.\
         return info.url;
     });
 
-    let pdfBlob;
-    const _downloadPDF = (imgURLs, imgType, name = '') => __awaiter(void 0, void 0, void 0, function* () {
-        if (pdfBlob) {
-            return FileSaver_min.saveAs(pdfBlob, `${name}.pdf`);
-        }
-        const cachedImg = document.querySelector('img[src*=score_]');
-        const { naturalWidth: width, naturalHeight: height } = cachedImg;
+    const _exportPDFBrowser = (imgURLs, imgType, dimensions) => __awaiter(void 0, void 0, void 0, function* () {
         const worker = new PDFWorkerHelper();
-        const pdfArrayBuffer = yield worker.generatePDF(imgURLs, imgType, width, height);
+        const pdfArrayBuffer = yield worker.generatePDF(imgURLs, imgType, dimensions.width, dimensions.height);
         worker.terminate();
-        pdfBlob = new Blob([pdfArrayBuffer]);
-        FileSaver_min.saveAs(pdfBlob, `${name}.pdf`);
+        return pdfArrayBuffer;
     });
-    const downloadPDF = (scoreinfo, sheet) => __awaiter(void 0, void 0, void 0, function* () {
+    const _exportPDFNode = (imgURLs, imgType, dimensions) => __awaiter(void 0, void 0, void 0, function* () {
+        const imgBufs = yield Promise.all(imgURLs.map(url => fetchBuffer(url)));
+        const { generatePDF } = PDFWorker();
+        const pdfArrayBuffer = yield generatePDF(imgBufs, imgType, dimensions.width, dimensions.height);
+        return pdfArrayBuffer;
+    });
+    const exportPDF = (scoreinfo, sheet) => __awaiter(void 0, void 0, void 0, function* () {
         const imgType = sheet.imgType;
         const pageCount = sheet.pageCount;
         const rs = Array.from({ length: pageCount }).map((_, i) => {
@@ -26707,7 +26769,23 @@ Please pipe the document into a Node stream.\
             }
         });
         const sheetImgURLs = yield Promise.all(rs);
-        return _downloadPDF(sheetImgURLs, imgType, scoreinfo.fileName);
+        const args = [sheetImgURLs, imgType, sheet.dimensions];
+        if (!detectNode) {
+            return _exportPDFBrowser(...args);
+        }
+        else {
+            return _exportPDFNode(...args);
+        }
+    });
+    let pdfBlob;
+    const downloadPDF = (scoreinfo, sheet, saveAs) => __awaiter(void 0, void 0, void 0, function* () {
+        const name = scoreinfo.fileName;
+        if (pdfBlob) {
+            return saveAs(pdfBlob, `${name}.pdf`);
+        }
+        const pdfArrayBuffer = yield exportPDF(scoreinfo, sheet);
+        pdfBlob = new Blob([pdfArrayBuffer]);
+        saveAs(pdfBlob, `${name}.pdf`);
     });
 
     const MSCZ_BUF_SYM = Symbol('msczBufferP');
@@ -27273,15 +27351,19 @@ Please pipe the document into a Node stream.\
         BtnAction.openUrl = BtnAction.download;
         BtnAction.mscoreWindow = (scoreinfo, fn) => {
             return (btnName, btn, setText) => __awaiter(this, void 0, void 0, function* () {
+                // save btn event for later use
                 const _onclick = btn.onclick;
+                // clear btn event
                 btn.onclick = null;
+                // set btn text to "PROCESSING"
                 setText(i18n('PROCESSING')());
+                // open a new tab
                 const w = yield windowOpenAsync(btn, '');
+                // add texts to the new tab
                 const txt = document.createTextNode(i18n('PROCESSING')());
                 w.document.body.append(txt);
-                // set page hooks
-                // eslint-disable-next-line prefer-const
-                let score;
+                // set page hooks that the new tab also closes as the og tab closes
+                let score; // eslint-disable-line prefer-const
                 const destroy = () => {
                     score && score.destroy();
                     w.close();
@@ -27290,12 +27372,37 @@ Please pipe the document into a Node stream.\
                 w.addEventListener('beforeunload', () => {
                     score && score.destroy();
                     window.removeEventListener('unload', destroy);
+                    // reset btn text
                     setText(btnName);
+                    // reinstate btn event
                     btn.onclick = _onclick;
                 });
-                score = yield loadMscore(scoreinfo, w);
-                fn(w, score, txt);
+                try {
+                    // fetch mscz & process using mscore
+                    score = yield loadMscore(scoreinfo, w);
+                    fn(w, score, txt);
+                }
+                catch (err) {
+                    console$1.error(err);
+                    // close the new tab & show error popup
+                    w.close();
+                    BtnAction.errorPopup()(btnName, btn, setText);
+                }
             });
+        };
+        BtnAction.errorPopup = () => {
+            return (btnName, btn, setText) => {
+                setText(i18n('BTN_ERROR')());
+                // ask user to send Discord message
+                alert('❌Download Failed!\n\n' +
+                    'Send your URL to the #dataset-patcher channel ' +
+                    'in the LibreScore Community Discord server:\n' + DISCORD_URL);
+                // open Discord on 'OK'
+                const a = document.createElement('a');
+                a.href = DISCORD_URL;
+                a.target = '_blank';
+                a.dispatchEvent(new MouseEvent('click'));
+            };
         };
         BtnAction.process = (fn, fallback, timeout = 10 * 60 * 1000 /* 10min */) => {
             return (name, btn, setText) => __awaiter(this, void 0, void 0, function* () {
@@ -27314,16 +27421,7 @@ Please pipe the document into a Node stream.\
                         setText(name);
                     }
                     else {
-                        setText(i18n('BTN_ERROR')());
-                        // ask user to send Discord message
-                        alert('❌Download Failed!\n\n' +
-                            'Send your URL to the #dataset-patcher channel ' +
-                            'in the LibreScore Community Discord server:\n' + DISCORD_URL);
-                        // open Discord on 'OK'
-                        const a = document.createElement('a');
-                        a.href = DISCORD_URL;
-                        a.target = '_blank';
-                        a.dispatchEvent(new MouseEvent('click'));
+                        BtnAction.errorPopup()(name, btn, setText);
                     }
                 }
                 btn.onclick = _onclick;
@@ -27405,10 +27503,13 @@ Please pipe the document into a Node stream.\
         }
         get thumbnailUrl() {
             var _a;
-            // url to the image of the first page
             const el = this.document.querySelector('link[as=image]');
             const url = ((el === null || el === void 0 ? void 0 : el.href) || ((_a = this.sheet0Img) === null || _a === void 0 ? void 0 : _a.src));
             return url.split('@')[0];
+        }
+        get dimensions() {
+            const { naturalWidth: width, naturalHeight: height } = this.sheet0Img;
+            return { width, height };
         }
     }
     const getActualId = (scoreinfo, _fetch = getFetch()) => __awaiter(void 0, void 0, void 0, function* () {
@@ -27453,7 +27554,7 @@ Please pipe the document into a Node stream.\
         });
         btnList.add({
             name: i18n('DOWNLOAD')('PDF'),
-            action: BtnAction.process(() => downloadPDF(scoreinfo, new SheetInfoInPage(document)), fallback, 3 * 60 * 1000 /* 3min */),
+            action: BtnAction.process(() => downloadPDF(scoreinfo, new SheetInfoInPage(document), saveAs), fallback, 3 * 60 * 1000 /* 3min */),
         });
         btnList.add({
             name: i18n('DOWNLOAD')('MXL'),
